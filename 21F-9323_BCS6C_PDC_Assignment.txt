@@ -1,0 +1,121 @@
+#include <mpi.h>
+#include <iostream>
+#include <cstdlib>
+#include <cmath>
+
+#define N 3 // Number of unknowns
+
+// Function declarations
+void performPartialPivoting(double local_mat[N / world_size][N+1]);
+void performForwardElimination(double local_mat[N / world_size][N+1]);
+void performBackSubstitution(double local_mat[N / world_size][N+1]);
+
+int main(int argc, char *argv[]) {
+
+double input_matrix[N][N+1] = {
+    {3, 2, -4, 3},
+    {2, 3, 3, 15},
+    {5, -3, 1, 14}
+};
+
+    MPI_Init(&argc, &argv);
+
+    int world_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+
+    int world_size;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+    // Check if the number of processes is compatible with the problem size
+    if (world_size != N) {
+        if (world_rank == 0) {
+            std::cerr << "Number of processes must match the size of the problem!" << std::endl;
+        }
+        MPI_Finalize();
+        return EXIT_FAILURE;
+    }
+
+    // Allocate memory for the local portion of the matrix
+    double local_mat[N / world_size][N+1]; // Each process will have a local portion of the augmented matrix
+
+    // Scatter the input matrix among MPI processes (not shown here)
+
+    // Perform Gaussian Elimination
+    performPartialPivoting(local_mat);
+    performForwardElimination(local_mat);
+    performBackSubstitution(local_mat);
+
+    // Finalize MPI
+    MPI_Finalize();
+    return EXIT_SUCCESS;
+}
+
+// Function to perform partial pivoting
+void performPartialPivoting(double local_mat[N / world_size][N+1]) {
+    for (int k = 0; k < N; ++k) {
+        // Find the row with the maximum absolute value in the current column
+        int max_row = k / world_size;
+        double max_val = std::abs(local_mat[k / world_size][k]);
+        for (int j = k / world_size + 1; j < N / world_size; ++j) {
+            if (std::abs(local_mat[j][k]) > max_val) {
+                max_row = j;
+                max_val = std::abs(local_mat[j][k]);
+            }
+        }
+
+        // Swap rows if necessary
+        if (max_row != k / world_size) {
+            for (int i = 0; i <= N; ++i) {
+                double temp = local_mat[k / world_size][i];
+                local_mat[k / world_size][i] = local_mat[max_row][i];
+                local_mat[max_row][i] = temp;
+            }
+        }
+    }
+}
+
+// Function to perform forward elimination
+void performForwardElimination(double local_mat[N / world_size][N+1]) {
+    for (int k = 0; k < N; ++k) {
+        // Broadcast the pivot row from the root process to all other processes
+        if (world_rank == k % world_size) {
+            MPI_Bcast(local_mat[k / world_size], N + 1, MPI_DOUBLE, k % world_size, MPI_COMM_WORLD);
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD); // Synchronize processes
+
+        // Perform elimination on local_mat
+        for (int i = k / world_size + 1; i < N / world_size; ++i) {
+            double factor = local_mat[i][k] / local_mat[k / world_size][k];
+            for (int j = k; j <= N; ++j) {
+                local_mat[i][j] -= factor * local_mat[k / world_size][j];
+            }
+        }
+    }
+}
+
+// Function to perform back substitution
+void performBackSubstitution(double local_mat[N / world_size][N+1]) {
+    double local_x[N / world_size]; // Local solution vector
+
+    for (int k = N - 1; k >= 0; --k) {
+        // Calculate the solution for the current variable
+        local_x[k / world_size] = local_mat[k / world_size][N];
+        for (int i = k / world_size + 1; i < N / world_size; ++i) {
+            local_x[k / world_size] -= local_mat[k / world_size][i] * local_x[i];
+        }
+        local_x[k / world_size] /= local_mat[k / world_size][k];
+
+        // Gather the local solutions to the root process
+        double global_x[N];
+        MPI_Gather(local_x, N / world_size, MPI_DOUBLE, global_x, N / world_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+        // Only the root process prints the solutions
+        if (world_rank == 0) {
+            std::cout << "Solution for the system:" << std::endl;
+            for (int i = 0; i < N; ++i) {
+                std::cout << global_x[i] << std::endl;
+            }
+        }
+    }
+}
